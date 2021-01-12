@@ -48,6 +48,7 @@ public class CodeGenerator extends Visitor<String> {
     private MethodDeclaration currentMethod;
     private int lastTempValue;
     private String stack_size;
+    private int labelNum = 0;
 
     public CodeGenerator(Graph<String> classHierarchy) {
         this.classHierarchy = classHierarchy;
@@ -243,11 +244,39 @@ public class CodeGenerator extends Visitor<String> {
     @Override
     public String visit(MethodDeclaration methodDeclaration) {
         //todo add method or constructor headers
+        String argsSigniture = "";
+        for(VarDeclaration v : methodDeclaration.getArgs()) {
+            argsSigniture = argsSigniture.concat(makeTypeSignature(v.getType()));
+        }
+        addCommand(".method public <init>("+argsSigniture+")V");
+        addCommand("aload_0");
         if(methodDeclaration instanceof ConstructorDeclaration) {
             //todo call parent constructor
+            if(currentClass.getParentClassName() == null)
+                addCommand("invokespecial java/lang/Object/<init>()V");
+            else {
+                String parentName = currentClass.getParentClassName().getName();
+                addCommand("invokespecial "+parentName+"/<init>()V");
+            }
             //todo initialize fields
+            for(int i = 0; i < currentClass.getFields().size(); i++) {
+                initializeVar(currentClass.getFields().get(i).getVarDeclaration(), i + 1);
+            }
         }
+        addCommand(".limit locals 128");
+        addCommand(".limit stack 128");
         //todo visit local vars and body and add return if needed
+        for(int i = 0; i < methodDeclaration.getLocalVars().size(); i++) {
+            methodDeclaration.getLocalVars().get(i).accept(this);
+            initializeVar(methodDeclaration.getLocalVars().get(i), i + 1); // slot??
+        }
+        for (Statement stmt: methodDeclaration.getBody()) {
+            stmt.accept(this);
+        }
+        if (!methodDeclaration.getDoesReturn())
+            addCommand("return");
+        addCommand(".end method");
+        addCommand("");
         return null;
     }
 
@@ -272,6 +301,9 @@ public class CodeGenerator extends Visitor<String> {
     @Override
     public String visit(BlockStmt blockStmt) {
         //todo
+        for (Statement stmt: blockStmt.getStatements()) {
+            stmt.accept(this);
+        }
         return null;
     }
 
@@ -301,6 +333,19 @@ public class CodeGenerator extends Visitor<String> {
         }
         else {
             //todo add commands to return
+            Expression exp = returnStmt.getReturnedExpr();
+            Type returnType = exp.accept(this.expressionTypeChecker);
+            addCommand(exp.accept(this));
+            if (returnType instanceof IntType) {
+                addCommand("invokestatic java/lang/Integer/valueOf(I)Ljava/lang/Integer;");
+                addCommand("ireturn");
+            }
+            else if (returnType instanceof BoolType){
+                addCommand("invokevirtual java/lang/Boolean/booleanValue()Z");
+            }
+            else {
+
+            }
         }
         return null;
     }
@@ -369,19 +414,32 @@ public class CodeGenerator extends Visitor<String> {
             //todo
             commands += op1.accept(this);
             commands += op2.accept(this);
-            /*
-            String s =  String.valueOf(this.labelNum);
+            String s1, s2;
             if (operator == BinaryOperator.gt) {
-                commands += "if_icmpgt Label" + s + "\n"; //???
+                s1 =  String.valueOf(this.labelNum);
                 this.labelNum += 1;
-                commands += "iconst_1\n";
-                s =  String.valueOf(this.labelNum);
-                commands += "goto Label" + s + "\n"; //???
+                commands += "if_icmpgt Label" + s1 + "\n"; //???
+                commands += "iconst_0\n";
+                s2 =  String.valueOf(this.labelNum);
+                this.labelNum += 1;
+                commands += "goto Label" + s2 + "\n";
+                commands += "Label" + s1 +":\n";
+                commands += "iconst_1";
+                commands += "Label" + s2 + ":\n";
             }
 
-            if (operator == BinaryOperator.lt)
-                commands += "if_icmplt\n";
-            */
+            if (operator == BinaryOperator.lt) {
+                s1 = String.valueOf(this.labelNum);
+                this.labelNum += 1;
+                commands += "if_icmplt Label" + s1 + "\n";
+                commands += "iconst_0\n";
+                s2 = String.valueOf(this.labelNum);
+                this.labelNum += 1;
+                commands += "goto Label" + s2 + "\n";
+                commands += "Label" + s1 + ":\n";
+                commands += "iconst_1";
+                commands += "Label" + s2 + ":\n";
+            }
         }
         else if((operator == BinaryOperator.eq) || (operator == BinaryOperator.neq)) {
             //todo
@@ -446,15 +504,25 @@ public class CodeGenerator extends Visitor<String> {
     public String visit(UnaryExpression unaryExpression) {
         UnaryOperator operator = unaryExpression.getOperator();
         String commands = "";
+        String s1, s2;
         if(operator == UnaryOperator.minus) {
             //todo
-            commands += unaryExpression.getOperand();
+            commands += unaryExpression.getOperand().accept(this);
             commands += "ineg\n";
         }
         else if(operator == UnaryOperator.not) {
             //todo
-            commands += unaryExpression.getOperand();
-            //commands += "\n"; ????
+            commands += unaryExpression.getOperand().accept(this);
+            s1 = String.valueOf(this.labelNum);
+            this.labelNum += 1;
+            s2 = String.valueOf(this.labelNum);
+            this.labelNum += 1;
+            commands += "ifeq Label" + s1 + "\n";
+            commands += "iconst_0\n";
+            commands += "goto Label" + s2 + "\n";
+            commands += "Label" + s1 + ":\n";
+            commands += "iconst_1\n";
+            commands += "Label" + s2 + ":\n";
         }
         else if((operator == UnaryOperator.predec) || (operator == UnaryOperator.preinc)) {
             if(unaryExpression.getOperand() instanceof Identifier) {
@@ -528,6 +596,25 @@ public class CodeGenerator extends Visitor<String> {
     public String visit(Identifier identifier) {
         String commands = "";
         //todo
+        Type t = identifier.accept(this.expressionTypeChecker);
+        if (t instanceof IntType || t instanceof BoolType) {
+            if (t instanceof IntType)
+                commands += "invokevirtual java/lang/Integer/intValue()I\n";
+            if (t instanceof BoolType)
+                commands += "invokevirtual java/lang/Boolean/booleanValue()Z\n";
+            int idx = this.slotOf(identifier.getName());
+            if (idx < 4)
+                commands += "iload_" + idx + "\n";
+            else
+                commands += "iload " + idx + "\n";
+        }
+        else {
+            int idx = this.slotOf(identifier.getName());
+            if (idx < 4)
+                commands += "aload_" + idx + "\n";
+            else
+                commands += "aload " + idx + "\n";
+        }
         return commands;
     }
 
@@ -570,6 +657,7 @@ public class CodeGenerator extends Visitor<String> {
     public String visit(NullValue nullValue) {
         String commands = "";
         //todo
+        commands += "aconst_null";
         return commands;
     }
 
@@ -577,6 +665,7 @@ public class CodeGenerator extends Visitor<String> {
     public String visit(IntValue intValue) {
         String commands = "";
         //todo
+        commands += "ldc " + intValue + "\n";
         return commands;
     }
 
@@ -591,6 +680,7 @@ public class CodeGenerator extends Visitor<String> {
     public String visit(StringValue stringValue) {
         String commands = "";
         //todo
+        commands += "ldc " + stringValue + "\n"; //quotation
         return commands;
     }
 
